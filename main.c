@@ -13,7 +13,11 @@
 #include "clogger/clogger.h"
 
 #pragma clang diagnostic push
+#pragma ide diagnostic ignored "missing_default_case"
 #pragma clang diagnostic ignored "-Wmissing-noreturn"
+
+#define MODE_CLIENT 0
+#define MODE_SERVER 1
 
 static volatile int running = 1;
 
@@ -22,32 +26,75 @@ void int_handler(int dummy) {
 }
 
 void print_usage() {
-    printf("usage: dtcp host port\n");
+    printf("usage: dtcp [-c|-s] [-h host] [-p port]\n");
 }
 
 void *send_thread(void *arg);
 
 void *recv_thread(void *arg);
 
-int make_connection(const char *host, const char *post);
+int make_connection(const char *host, const char *port);
+
+int listen_for_client(const char *host, const char *port);
 
 int main(int argc, char *argv[]) {
     const char *tag = "main";
 
-    if (argc != 3) {
-        printf("unknown arguments\n");
+    int mode = MODE_CLIENT;
+    char *host = "127.0.0.1";
+    char *port = "2333";
+
+    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+        print_usage();
+        return 0;
+    } else if (argc > 6) {
+        printf("too many arguments\n");
         print_usage();
         exit(1);
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strlen(argv[i]) == 2 && argv[i][0] == '-') {
+            char option = argv[i][1];
+            switch (option) {
+                case 'c':
+                    mode = MODE_CLIENT;
+                    break;
+                case 's':
+                    mode = MODE_SERVER;
+                    break;
+                case 'h':
+                    host = argv[++i];
+                    break;
+                case 'p':
+                    port = argv[++i];
+                    break;
+                default:
+                    printf("unknown arguments\n");
+                    print_usage();
+                    exit(1);
+            }
+        } else {
+            printf("unknown arguments\n");
+            print_usage();
+            exit(1);
+        }
     }
 
     log_i(tag, "Starting...");
 
     signal(SIGINT, int_handler);
 
-    char *serv_host = argv[1];
-    char *serv_port = argv[2];
+    int sock = -1;
+    switch (mode) {
+        case MODE_CLIENT:
+            sock = make_connection(host, port);
+            break;
+        case MODE_SERVER:
+            sock = listen_for_client(host, port);
+            break;
+    }
 
-    int sock = make_connection(serv_host, serv_port);
     if (sock < 0) {
         log_e(tag, "Failed to connect to server.");
         exit(1);
@@ -109,37 +156,47 @@ void *recv_thread(void *arg) {
     return NULL;
 }
 
-int make_connection(const char *host, const char *post) {
-    char *tag = "make_connection";
+struct addrinfo *resolve_host(const char *host, const char *port) {
+    char *tag = "resolve_host";
 
-    log_i(tag, "Looking up host: %s...", host);
+    log_i(tag, "Resolving host: %s...", host);
     struct addrinfo addr_criteria;
     memset(&addr_criteria, 0, sizeof(addr_criteria));
     addr_criteria.ai_family = AF_UNSPEC;
     addr_criteria.ai_socktype = SOCK_STREAM;
     addr_criteria.ai_protocol = IPPROTO_TCP;
     struct addrinfo *addr_list = NULL;
-    if (getaddrinfo(host, post, &addr_criteria, &addr_list) || addr_list == NULL) {
-        log_e(tag, "Failed to look up host.");
+    if (getaddrinfo(host, port, &addr_criteria, &addr_list) || addr_list == NULL) {
+        log_e(tag, "Failed to resolve host.");
         exit(1);
     }
-    log_i(tag, "Succeeded to look up host.");
+    log_i(tag, "Succeeded to resolve host.");
 
+    return addr_list;
+}
+
+void sockaddr2ip(struct sockaddr *addr, char *ip_str) {
+    switch (addr->sa_family) {
+        case AF_INET:
+            inet_ntop(AF_INET, &((struct sockaddr_in *) addr)->sin_addr, ip_str, INET_ADDRSTRLEN);
+            break;
+        case AF_INET6:
+            inet_ntop(AF_INET6, &((struct sockaddr_in6 *) addr)->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+            break;
+        default:
+            break;
+    }
+}
+
+int make_connection(const char *host, const char *port) {
+    char *tag = "make_connection";
+
+    struct addrinfo *addr_list = resolve_host(host, port);
     int sock = -1;
 
     char *addr_str = malloc(INET6_ADDRSTRLEN);
     for (struct addrinfo *addr_info = addr_list; addr_info != NULL; addr_info = addr_info->ai_next) {
-        switch (addr_info->ai_addr->sa_family) {
-            case AF_INET:
-                inet_ntop(AF_INET, &((struct sockaddr_in *) addr_info->ai_addr)->sin_addr, addr_str, INET_ADDRSTRLEN);
-                break;
-            case AF_INET6:
-                inet_ntop(AF_INET6, &((struct sockaddr_in6 *) addr_info->ai_addr)->sin6_addr, addr_str,
-                          INET6_ADDRSTRLEN);
-                break;
-            default:
-                break;
-        }
+        sockaddr2ip(addr_info->ai_addr, addr_str);
         log_i(tag, "Trying %s...", addr_str);
 
         sock = socket(addr_info->ai_family, addr_info->ai_socktype, addr_info->ai_protocol);
@@ -149,7 +206,7 @@ int make_connection(const char *host, const char *post) {
         }
         log_i(tag, "Obtained socket: %d.", sock);
 
-        log_i(tag, "Connecting to server: %s:%s...", addr_str, post);
+        log_i(tag, "Connecting to server: %s:%s...", addr_str, port);
         if (connect(sock, addr_info->ai_addr, addr_info->ai_addrlen) == 0) {
             log_i(tag, "Connected.");
             break;
@@ -162,6 +219,48 @@ int make_connection(const char *host, const char *post) {
 
     freeaddrinfo(addr_list);
     return sock;
+}
+
+int listen_for_client(const char *host, const char *port) {
+    char *tag = "listen_for_client";
+
+    struct addrinfo *addr_info = resolve_host(host, port);
+    struct sockaddr *addr = addr_info->ai_addr;
+
+    int server_sock;
+    if ((server_sock = socket(addr_info->ai_family, addr_info->ai_socktype, addr_info->ai_protocol)) < 0) {
+        log_e(tag, "Failed to obtain server socket.");
+        exit(1);
+    }
+    log_i(tag, "Obtained server socket: %d.", server_sock);
+
+    char *addr_str = malloc(INET6_ADDRSTRLEN);
+    sockaddr2ip(addr, addr_str);
+
+    log_i(tag, "Binding to ip and port: %s:%s...", addr_str, port);
+    if (bind(server_sock, addr, sizeof(*addr)) < 0) {
+        log_e(tag, "Failed to bind server socket.");
+        exit(1);
+    }
+    log_i(tag, "Succeeded to bind socket.");
+
+    if (listen(server_sock, 1) < 0) {
+        log_e(tag, "Failed to start listening.");
+        exit(1);
+    }
+    log_i(tag, "Start listening...");
+
+    struct sockaddr clnt_addr;
+    socklen_t clnt_addr_len = sizeof(clnt_addr);
+    int client_sock = accept(server_sock, &clnt_addr, &clnt_addr_len);
+    if (client_sock < 0) {
+        log_e(tag, "Failed to accept client.");
+        exit(1);
+    }
+    sockaddr2ip(&clnt_addr, addr_str);
+    log_i(tag, "Succeeded to accept client: %s, socket: %d.", addr_str, client_sock);
+    free(addr_str);
+    return client_sock;
 }
 
 #pragma clang diagnostic pop
