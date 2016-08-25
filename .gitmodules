@@ -1,0 +1,3 @@
+[submodule "clogger"]
+	path = clogger
+	url = https://github.com/richardchien/clogger
