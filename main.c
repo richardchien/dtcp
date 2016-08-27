@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
     char *host = "127.0.0.1";
     char *port = "2333";
 
-    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
         print_usage();
         return 0;
     } else if (argc > 6) {
